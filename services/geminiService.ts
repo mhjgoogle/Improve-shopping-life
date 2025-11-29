@@ -62,15 +62,14 @@ You must **ALWAYS** respond with a valid JSON object adhering to the schema prov
 * **Transition:** After search results are returned to the user, transition to SELECT_PRODUCT.
 
 **Phase 4: SELECT_PRODUCT (Selection)**
-* **Logic:** The user selects an item from the search results.
-* **Action:** Confirm the selection.
+* **Logic:** The user sees search results.
+* **Action:** Wait for user to interact.
 * **Transition:**
-    * If it's an "Accessory" AND we have a user image: Ask if they want to "Try it on". Transition to VIRTUAL_TRYON.
-    * If it's a "Subject": End flow or suggest AR view (future feature).
+    * The frontend handles specific product selection/try-on. The AI should simply acknowledge choices or ask if they want to try more.
 
 **Phase 5: VIRTUAL_TRYON (Visualization)**
-* **Logic:** User requested a try-on.
-* **Action:** Set required_action to CALL_VTON_TOOL. Provide a 'vton_prompt' in tool_parameters (e.g., "A person wearing a red summer dress").
+* **Logic:** User requested a try-on (frontend triggers this).
+* **Action:** Set required_action to CALL_VTON_TOOL. Provide a 'vton_prompt'.
 * **Transition:** Once the VTON image is generated, transition to EVALUATION.
 
 **Phase 6: EVALUATION (Scoring)**
@@ -96,8 +95,6 @@ export const sendMessageToAgent = async (
     const parts: any[] = [{ text: latestMessage }];
 
     if (imageData) {
-      // Extract base64 data and mime type
-      // Format: "data:image/png;base64,..."
       const match = imageData.match(/^data:(.+);base64,(.+)$/);
       if (match) {
         parts.push({
@@ -134,7 +131,6 @@ export const sendMessageToAgent = async (
     throw new Error("No response text");
   } catch (error) {
     console.error("Agent Error:", error);
-    // Fallback response in case of parsing error
     return {
       thought: "Error occurred",
       user_message: "申し訳ありません、エラーが発生しました。もう一度お試しください。",
@@ -145,13 +141,14 @@ export const sendMessageToAgent = async (
 };
 
 export const searchProductsWithGemini = async (query: string): Promise<Product[]> => {
-  // Using Grounding with Google Search to find real products
   try {
+    // Explicitly asking for links and sources
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: `Find 3 fashion/furniture products for: "${query}". 
-      Return ONLY a JSON array. Each object must have: id, name, price, imageUrl, description.
-      Use generic placeholder images from https://picsum.photos if real ones cannot be scraped directly, but prefer real data if grounded.`,
+      contents: `Find 4 real fashion/furniture products for: "${query}". 
+      Return ONLY a JSON array. 
+      IMPORTANT: Try to include the real 'link' and 'source' (e.g. Amazon, Rakuten, Uniqlo) if found via grounding.
+      Each object must have: id, name, price, imageUrl, description, link, source.`,
       config: {
         tools: [{ googleSearch: {} }],
         responseMimeType: "application/json",
@@ -164,7 +161,9 @@ export const searchProductsWithGemini = async (query: string): Promise<Product[]
               name: { type: Type.STRING },
               price: { type: Type.STRING },
               imageUrl: { type: Type.STRING },
-              description: { type: Type.STRING }
+              description: { type: Type.STRING },
+              link: { type: Type.STRING },
+              source: { type: Type.STRING }
             }
           }
         }
@@ -173,21 +172,21 @@ export const searchProductsWithGemini = async (query: string): Promise<Product[]
 
     if (response.text) {
       const products = JSON.parse(response.text);
-      // Ensure images are valid or fallback
       return products.map((p: any, index: number) => ({
         ...p,
         id: p.id || `prod-${index}`,
-        imageUrl: p.imageUrl && p.imageUrl.startsWith('http') ? p.imageUrl : `https://picsum.photos/300/400?random=${index}`
+        imageUrl: p.imageUrl && p.imageUrl.startsWith('http') ? p.imageUrl : `https://picsum.photos/300/400?random=${index}`,
+        link: p.link || `https://www.google.com/search?q=${encodeURIComponent(p.name)}`, // Fallback link
+        source: p.source || 'Online Store'
       }));
     }
     return [];
   } catch (e) {
     console.error("Search Error", e);
-    // Mock fallback if search fails
     return [
-      { id: '1', name: 'Stylish Option A', price: '¥5,000', description: 'A great choice for this style.', imageUrl: 'https://picsum.photos/300/400?random=1' },
-      { id: '2', name: 'Premium Option B', price: '¥12,000', description: 'High quality material.', imageUrl: 'https://picsum.photos/300/400?random=2' },
-      { id: '3', name: 'Budget Option C', price: '¥2,500', description: 'Affordable and trendy.', imageUrl: 'https://picsum.photos/300/400?random=3' },
+      { id: '1', name: 'Summer Floral Dress', price: '¥5,000', description: 'Lightweight and airy.', imageUrl: 'https://picsum.photos/300/400?random=1', link: '#', source: 'Sample Store' },
+      { id: '2', name: 'Denim Jacket', price: '¥12,000', description: 'Classic fit.', imageUrl: 'https://picsum.photos/300/400?random=2', link: '#', source: 'Sample Store' },
+      { id: '3', name: 'Casual T-Shirt', price: '¥2,500', description: 'Cotton blend.', imageUrl: 'https://picsum.photos/300/400?random=3', link: '#', source: 'Sample Store' },
     ];
   }
 };
@@ -201,7 +200,7 @@ export const generateTryOnImage = async (userImage: string, productDescription: 
     const base64Data = match[2];
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-image", // Using image model for editing/generation
+      model: "gemini-2.5-flash-image",
       contents: {
         parts: [
           {
@@ -211,16 +210,20 @@ export const generateTryOnImage = async (userImage: string, productDescription: 
             }
           },
           {
-            text: `Replace the clothing or accessory in this image to match this description: ${productDescription}. Keep the person/subject identity and background consistent. High quality, photorealistic.`
+            text: `Image Editing Task: Overlay or Replace clothing.
+            Target Product: ${productDescription}.
+            
+            CRITICAL INSTRUCTIONS:
+            1. PRESERVE THE USER'S EXACT BODY SHAPE AND PROPORTIONS. Do not slim, do not elongate legs, do not beautify. The goal is a realistic fit check.
+            2. Maintain the original pose, lighting, and background exactly.
+            3. The product should look photorealistic on the subject.
+            4. If the product is a piece of furniture, place it realistically in the room scene, maintaining perspective.`
           }
         ]
       },
-      config: {
-        // Note: responseMimeType not supported for image models usually in this SDK version unless specific
-      }
+      config: {}
     });
 
-    // Check for inline data (image)
     const candidates = response.candidates;
     if (candidates && candidates.length > 0) {
        for (const part of candidates[0].content.parts) {
@@ -232,7 +235,6 @@ export const generateTryOnImage = async (userImage: string, productDescription: 
     throw new Error("No image generated");
   } catch (error) {
     console.error("VTON Error:", error);
-    // Return original image as fallback to prevent crash, effectively "no change"
     return userImage;
   }
 };

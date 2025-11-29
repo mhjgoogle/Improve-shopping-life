@@ -30,6 +30,7 @@ export interface Product {
   imageUrl: string;
   description: string;
   link?: string;
+  source?: string;
 }
 
 export interface Message {
@@ -52,6 +53,6 @@ export interface AppState {
   messages: Message[];
   currentPhase: ShoppingPhase;
   userImage: string | null; // Base64
-  selectedProduct: Product | null;
+  selectedProducts: Product[]; // Changed to array for multi-select
   isLoading: boolean;
 }
